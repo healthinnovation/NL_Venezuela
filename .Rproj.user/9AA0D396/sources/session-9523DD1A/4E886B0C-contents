@@ -1,0 +1,343 @@
+---
+title: "Resultados Venezuela"
+format:
+  html: 
+    toc: true
+    code-fold: true
+    theme: flatly
+    fontsize: 1.1em
+    linestretch: 1.7
+---
+
+# paquetes
+
+```{r,message=F,warning=F}
+
+library(tidyverse)
+library(INLA)
+library(udunits2)
+library(sf)
+library(spdep)
+library(tictoc)
+library(readr)
+library(plm)
+library(Metrics)
+library(lme4)
+
+
+
+```
+
+# Datos
+
+```{r,message=F,warning=F}
+
+
+db.vec          <- readRDS("db_venec_modelo.rds") %>%   
+                   mutate(population = pop) %>% 
+                   mutate(ID = ID -212)  %>% 
+                   ungroup() %>% 
+                   group_by(ADM2_ES) %>% 
+                   mutate(ID_MUNI = group_indices()) %>% 
+                   ungroup()
+
+vene.shp        <- readRDS("db_shp_modelo.rds") %>% 
+                   mutate(ID = ID -212) 
+
+
+
+
+
+vene_adj    <-  poly2nb(vene.shp)
+
+# Spatial weights
+
+
+W.vene      <- nb2mat(vene_adj, style = "W")
+
+```
+
+# Funciones
+
+```{r,message=F,warning=F}
+
+inla.batch.spec <- function(formula, dat1 = db.vec) {
+                   model = inla(formula, data=dat1, family="nbinomial", 
+                               offset=log(population), verbose = F, 
+                                #control.inla=list(strategy="gaussian"),
+                                control.inla=list(strategy="adaptive"),
+                                control.compute=list(config=F, dic=T, cpo=T, waic=T,
+                                                     return.marginals = FALSE),
+                                control.fixed = list(correlation.matrix=T),
+                                control.predictor=list(link=1,compute=TRUE)
+                            )
+                   model  <- inla.rerun(model)
+                   return(model)
+}
+
+
+inla.batch.spec.full <- function(formula, dat1 = db.vec) {
+                   model = inla(formula, data=dat1, family="nbinomial", 
+                               offset=log(population), verbose = F, 
+                                #control.inla=list(strategy="gaussian"),
+                                control.inla=list(strategy="adaptive"),
+                                control.compute=list(config=F, dic=T, cpo=T, waic=T,
+                                                     return.marginals.predictor = TRUE),
+                                control.fixed = list(correlation.matrix=T),
+                                 control.predictor=list(compute=TRUE,link=1)
+                            )
+                   model  <- inla.rerun(model)
+                   return(model)
+}
+
+
+
+scale.den <- function(x){
+              (x - mean(x, na.rm=TRUE)) / sd(x, na.rm=TRUE)
+}
+```
+
+# Ajuste de modelos : Modelo de efectos fijos y espaciotemporal
+
+## Modelo de Efectos fijos
+
+::: {.panel-tabset}
+
+### Vivax
+
+```{r,message=F,warning=F}
+
+library(fixest)
+# reghdfe rpv viirs tmmx pr if year>2013, abs( adm3_es year ) cl( adm2_es )
+model.fixest.pv <- feols(PV ~ viirs + tmmx + pr + offset(pop) | ID + Year, 
+                         cluster = db.vec$ID_MUNI ,data = db.vec)
+
+
+
+```
+
+### Falciparum
+
+```{r,message=F,warning=F}
+
+library(fixest)
+#reghdfe rpf viirs tmmx pr if year>2013, abs( adm3_es year ) cl( adm2_es )
+model.fixest.pf <- feols(PF ~ viirs + tmmx + pr + offset(pop) | ID + Year, 
+                         cluster = db.vec$ID_MUNI ,data = db.vec)
+
+
+
+```
+
+:::
+
+
+
+## EspacioTemporal
+
+::: {.panel-tabset}
+
+
+### Vivax
+
+```{r,message=F,warning=F}
+
+
+# mejor modelo
+formula_vector_vec_vx.26  =     PV     ~     f(Year,model="rw1", replicate = ID, 
+                                               cyclic = TRUE, 
+                                               constr = TRUE)                    +
+                                           f(inla.group(pr),model="rw1")         +
+                                           f(inla.group(tmmx),model="rw1")       +
+                                           f(ID,model="bym2",graph=W.vene)       +
+                                           viirs
+
+
+
+model.spec.vx.26         <-   inla.batch.spec(formula_vector_vec_vx.26,dat1=db.vec)
+
+
+
+
+```
+
+### Falciparum
+
+```{r,message=F,warning=F}
+
+
+formula_vector_vec_fc.26 =     PF     ~     f(Year,model="rw1", replicate = ID, 
+                                               cyclic = TRUE, 
+                                               constr = TRUE)                    +
+                                           f(inla.group(pr),model="rw1")         +
+                                           f(inla.group(tmmx),model="rw1")       +
+                                           f(ID,model="bym2",graph=W.vene)       +
+                                           viirs
+
+
+
+model.spec.fc.26      <-  inla.batch.spec(formula_vector_vec_fc.26,dat1=db.vec)
+
+```
+
+:::
+
+
+
+
+
+# Error de prediccion : Median Absolute Error (Mdae)
+
+## Tablas
+
+```{r,message=F,warning=F}
+
+
+
+data.error <-data.frame(Especie    =c("Falciparum","Vivax"),
+                        error_inla =c(mdae(db.vec$PF,model.spec.fc.26$summary.fitted.values$mean),
+                                      mdae(db.vec$PV,model.spec.vx.26$summary.fitted.values$mean)),
+                        error_fe   =c(mdae(db.vec$PF, predict(model.fixest.pf)),
+                                      mdae(db.vec$PV, predict(model.fixest.pv)))
+)
+
+
+data.error.1 <-data.frame(Especie    =c("Falciparum","Vivax"),
+                        error_inla =c(mae(db.vec$PF,model.spec.fc.26$summary.fitted.values$mean),
+                                      mae(db.vec$PV,model.spec.vx.26$summary.fitted.values$mean)),
+                        error_fe   =c(mae(db.vec$PF, predict(model.fixest.pf)),
+                                      mae(db.vec$PV, predict(model.fixest.pv)))
+)
+
+
+
+  # data.error %>%
+  # gt::gt()   %>%
+  # gt::tab_options(
+  #   columnLabels = list(
+  #     error_inla = "Error Espacio-Temporal",
+  #     error_fe   = "Error efectos fijos"
+  #   )
+  # )
+
+  library(gt)
+  library(gtExtras)
+  data.error                                     %>% 
+  gt::gt()                                       %>%
+  tab_header(
+    title = md("**Error de prediccion**"),
+    subtitle = "MDAE"
+  ) %>% 
+  cols_label(error_inla = "Error (Espacio Temporal)", 
+             error_fe   = "Error (FE)")   %>%
+  gt_theme_nytimes()
+    
+  # gt_set_col_headers(c("Error (Spacio - Temporal)", "Error (FE)")) 
+
+  
+  library(gt)
+  library(gtExtras)
+  data.error.1                                     %>% 
+  gt::gt()                                       %>%
+  tab_header(
+    title = " ",
+    subtitle = "MAE"
+  ) %>% 
+  cols_label(error_inla = "Error (Espacio Temporal)", 
+             error_fe   = "Error (FE)")   %>%
+  gt_theme_nytimes()
+
+
+
+```
+
+## Graficos
+
+::: {.panel-tabset}
+
+
+### Vivax
+
+
+```{r,warning=F,echo=F,width=12,message=F,fig.height=5}
+
+db.vec.rev <- db.vec                                                         %>% 
+              mutate( ID = ID +212,
+                     fit.inla.pv = model.spec.vx.26$summary.fitted.values$mean,
+                     fit.fe.pv   = predict(model.fixest.pv),
+                     fit.inla.pf = model.spec.fc.26$summary.fitted.values$mean,
+                     fit.fe.pf   = predict(model.fixest.pf)
+                    )                                                        %>% 
+             group_by(ID,municipio,parroquia)                                   %>% 
+             summarise(
+                       error_inla_pv = round(mdae(PV,fit.inla.pv),1),
+                       error_fe_pv   = round(mdae(PV,fit.fe.pv),1),
+                       error_inla_pf = round(mdae(PF,fit.inla.pv),1),
+                       error_fe_pf   = round(mdae(PF,fit.fe.pv),1)
+                      )
+
+
+
+vene.shp        <- readRDS("db_shp_modelo.rds")    %>% 
+                   mutate(ID = ID ) 
+
+db.vec.rev.shp  <-  vene.shp                     %>% 
+                   left_join(db.vec.rev,by=c("ID"))  
+
+
+
+spatio.tempo.plot <- db.vec.rev.shp                  %>% 
+                     ggplot()                         +
+                     geom_sf(aes(fill=error_inla_pv)) +
+                     theme_bw()                       +
+                     scale_fill_gradient(low = "#ffe6e6", high = "darkgreen",name ="MDAE") +
+                      labs(title = " Modelo Espacio-Temporal ")   
+  
+  
+
+fe.plot  <- db.vec.rev.shp                 %>% 
+            ggplot()                        +
+            geom_sf(aes(fill=error_fe_pv))  +
+            theme_bw()                       +
+              scale_fill_gradient(low = "#ffe6e6", high = "darkgreen",name ="MDAE") +
+                      labs(title = " Modelo de Efectos fijos")   
+  
+library(gridExtra)
+grid.arrange(spatio.tempo.plot, 
+             fe.plot, ncol = 2)
+
+
+```
+
+
+### Falciparum
+
+
+```{r,warning=F,echo=F,width=12,message=F,fig.height=5}
+
+
+spatio.tempo.plot <- db.vec.rev.shp                  %>% 
+                     ggplot()                         +
+                     geom_sf(aes(fill=error_inla_pf)) +
+                     theme_bw()                       +
+                     scale_fill_gradient(low = "#ffe6e6", high = "darkgreen",name ="MDAE") +
+                      labs(title = " Modelo Espacio-Temporal ")   
+  
+  
+
+fe.plot  <- db.vec.rev.shp                 %>% 
+            ggplot()                        +
+            geom_sf(aes(fill=error_fe_pf))  +
+            theme_bw()                       +
+              scale_fill_gradient(low = "#ffe6e6", high = "darkgreen",name ="MDAE") +
+                      labs(title = " Modelo de Efectos fijos")   
+  
+library(gridExtra)
+grid.arrange(spatio.tempo.plot, 
+             fe.plot, ncol = 2)
+
+
+```
+
+
+:::

@@ -1,0 +1,5 @@
+"0",""
+"0","library(sjPlot)"
+"0","library(sjmisc)"
+"0","tab_model(model.fixest.pf.old ,digits = 3)"
+"0",""
